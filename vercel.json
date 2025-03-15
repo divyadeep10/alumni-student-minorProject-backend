@@ -19,9 +19,5 @@
       "src": "/(.*)",
       "dest": "/server.js"
     }
-  ],
-  "env": {
-    "MONGO_URI": "mongodb+srv://divyadeepsundriyal:34KY6UXvUmSwSkhL@cluster0.qmxx1.mongodb.net/test",
-    "JWT_SECRET": "123123123"
-  }
+  ]
 }
