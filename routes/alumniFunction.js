@@ -335,4 +335,36 @@ router.get('/my-mentees', authAlumni, async (req, res) => {
   }
 });
 
+// Get public profile of a specific alumni
+router.get('/:alumniId', async (req, res) => {
+  try {
+    const alumniId = req.params.alumniId;
+    
+    // Get the alumni details with limited fields for public view
+    const alumni = await Alumni.findById(alumniId)
+      .select('name email collegeId careerInsights expertiseAreas industryExperience mentorStyle');
+    
+    if (!alumni) {
+      return res.status(404).json({ message: "Alumni not found" });
+    }
+    
+    // Format the alumni data for response
+    const alumniData = {
+      id: alumni._id,
+      name: alumni.name,
+      email: alumni.email,
+      collegeId: alumni.collegeId,
+      careerInsights: alumni.careerInsights,
+      expertiseAreas: alumni.expertiseAreas ? Object.fromEntries(alumni.expertiseAreas) : {},
+      industryExperience: alumni.industryExperience || [],
+      mentorStyle: alumni.mentorStyle
+    };
+    
+    res.json(alumniData);
+  } catch (err) {
+    console.error("Error fetching alumni:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 module.exports = router;
