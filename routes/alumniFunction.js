@@ -33,7 +33,18 @@ router.get('/top-alumni', async (req, res) => {
   try {
     const allAlumni = await Alumni.find({});
     const sortedAlumni = allAlumni.sort((a, b) => b.connections.length - a.connections.length);
-    const topAlumni = sortedAlumni.slice(0, 5);
+    const topAlumni = sortedAlumni.slice(0, 5).map(alumni => ({
+      _id: alumni._id,
+      name: alumni.name,
+      email: alumni.email,
+      collegeId: alumni.collegeId,
+      careerInsights: alumni.careerInsights,
+      // Convert Map to Object for proper JSON serialization
+      expertiseAreas: alumni.expertiseAreas ? Object.fromEntries(alumni.expertiseAreas) : {},
+      industryExperience: alumni.industryExperience || [],
+      mentorStyle: alumni.mentorStyle,
+      connections: alumni.connections
+    }));
     res.json({ topAlumni });
   } catch (err) {
     console.error(err);
@@ -355,6 +366,7 @@ router.get('/:alumniId', async (req, res) => {
       email: alumni.email,
       collegeId: alumni.collegeId,
       careerInsights: alumni.careerInsights,
+      // Convert Map to Object for proper JSON serialization
       expertiseAreas: alumni.expertiseAreas ? Object.fromEntries(alumni.expertiseAreas) : {},
       industryExperience: alumni.industryExperience || [],
       mentorStyle: alumni.mentorStyle
