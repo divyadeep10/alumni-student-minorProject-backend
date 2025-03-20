@@ -78,6 +78,20 @@ router.post('/request-mentor', authStudent, async (req, res) => {
       alumni: alumniId
     });
 
+    // If request exists and is rejected, allow sending a new request
+    if (existingRequest && existingRequest.status === 'rejected') {
+      // Update the existing request to pending
+      existingRequest.status = 'pending';
+      existingRequest.requestedAt = Date.now(); // Reset the request time
+      await existingRequest.save();
+      
+      return res.json({ 
+        message: "Mentorship request sent successfully",
+        status: 'pending'
+      });
+    }
+
+    // If request exists and is not rejected, return current status
     if (existingRequest) {
       return res.status(400).json({ 
         message: "A mentorship request already exists with this alumni",
@@ -93,7 +107,10 @@ router.post('/request-mentor', authStudent, async (req, res) => {
     });
     
     await request.save();
-    res.json({ message: "Mentorship request sent successfully" });
+    res.json({ 
+      message: "Mentorship request sent successfully",
+      status: 'pending'
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });
@@ -244,6 +261,102 @@ router.get('/dashboard-stats', authStudent, async (req, res) => {
     });
   } catch (err) {
     console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// View mentor profile (only connected mentors)
+router.get('/view-mentor/:mentorId', authStudent, async (req, res) => {
+  try {
+    const studentId = req.user.userId;
+    const mentorId = req.params.mentorId;
+    
+    // Verify the student has a connection with this mentor
+    const student = await Student.findById(studentId);
+    if (!student) {
+      return res.status(404).json({ message: "Student not found" });
+    }
+    
+    // Check if the mentor is in the student's connections
+    if (!student.connections.includes(mentorId)) {
+      return res.status(403).json({ 
+        message: "Access denied. You can only view profiles of your connected mentors." 
+      });
+    }
+    
+    // Fetch mentor details
+    const mentor = await Alumni.findById(mentorId)
+      .select('-password -mentees -connections -__v');
+    
+    if (!mentor) {
+      return res.status(404).json({ message: "Mentor not found" });
+    }
+    
+    // Get active mentorship status
+    const mentorship = await Mentorship.findOne({
+      student: studentId,
+      alumni: mentorId,
+      status: 'accepted'
+    });
+    
+    // Return mentor profile with mentorship details
+    res.json({
+      mentor,
+      mentorshipDetails: mentorship ? {
+        since: mentorship.requestedAt,
+        duration: Math.floor((Date.now() - new Date(mentorship.requestedAt).getTime()) / (1000 * 60 * 60 * 24)) + ' days'
+      } : null
+    });
+    
+  } catch (err) {
+    console.error("Error viewing mentor profile:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// View all connected mentors with basic info
+router.get('/my-mentors', authStudent, async (req, res) => {
+  try {
+    const studentId = req.user.userId;
+    
+    // Find the student and populate connections with limited fields
+    const student = await Student.findById(studentId)
+      .populate('connections', 'name email industryExperience expertiseAreas mentorStyle');
+    
+    if (!student) {
+      return res.status(404).json({ message: "Student not found" });
+    }
+    
+    res.json({ mentors: student.connections });
+    
+  } catch (err) {
+    console.error("Error fetching mentors:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Add a new endpoint to check mentorship request status
+router.get('/request-status/:alumniId', authStudent, async (req, res) => {
+  try {
+    const alumniId = req.params.alumniId;
+    const studentId = req.user.userId;
+    
+    // Find the request
+    const request = await Mentorship.findOne({
+      student: studentId,
+      alumni: alumniId
+    });
+    
+    if (!request) {
+      return res.json({ status: 'none' }); // No request exists
+    }
+    
+    res.json({ 
+      status: request.status,
+      requestedAt: request.requestedAt
+    });
+  } catch (err) {
+    console.error("Error checking request status:", err);
     res.status(500).json({ message: "Server error" });
   }
 });

@@ -265,4 +265,74 @@ router.get('/dashboard-stats', authAlumni, async (req, res) => {
   }
 });
 
+// View mentee profile (only connected mentees)
+router.get('/view-mentee/:menteeId', authAlumni, async (req, res) => {
+  try {
+    const alumniId = req.user.userId;
+    const menteeId = req.params.menteeId;
+    
+    // Verify the alumni has a connection with this mentee
+    const alumni = await Alumni.findById(alumniId);
+    if (!alumni) {
+      return res.status(404).json({ message: "Alumni not found" });
+    }
+    
+    // Check if the mentee is in the alumni's connections
+    if (!alumni.connections.includes(menteeId)) {
+      return res.status(403).json({ 
+        message: "Access denied. You can only view profiles of your connected mentees." 
+      });
+    }
+    
+    // Fetch mentee details
+    const mentee = await Student.findById(menteeId)
+      .select('-password -connections -__v');
+    
+    if (!mentee) {
+      return res.status(404).json({ message: "Mentee not found" });
+    }
+    
+    // Get active mentorship status
+    const mentorship = await Mentorship.findOne({
+      student: menteeId,
+      alumni: alumniId,
+      status: 'accepted'
+    });
+    
+    // Return mentee profile with mentorship details
+    res.json({
+      mentee,
+      mentorshipDetails: mentorship ? {
+        since: mentorship.requestedAt,
+        duration: Math.floor((Date.now() - new Date(mentorship.requestedAt).getTime()) / (1000 * 60 * 60 * 24)) + ' days'
+      } : null
+    });
+    
+  } catch (err) {
+    console.error("Error viewing mentee profile:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// View all connected mentees with basic info
+router.get('/my-mentees', authAlumni, async (req, res) => {
+  try {
+    const alumniId = req.user.userId;
+    
+    // Find the alumni and populate connections with limited fields
+    const alumni = await Alumni.findById(alumniId)
+      .populate('connections', 'name email collegeId interests careerGoals learningStyle');
+    
+    if (!alumni) {
+      return res.status(404).json({ message: "Alumni not found" });
+    }
+    
+    res.json({ mentees: alumni.connections });
+    
+  } catch (err) {
+    console.error("Error fetching mentees:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 module.exports = router;
