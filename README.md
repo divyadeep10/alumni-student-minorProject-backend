@@ -1,4 +1,4 @@
-34KY6UXvUmSwSkhL
+
 divyadeepsundriyal
 
 /api/auth/register/student  - for register student
