@@ -1,7 +1,8 @@
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 
-const webinarSchema = new Schema({
+// Add this field to your Webinar schema
+const WebinarSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String },
   host: { type: Schema.Types.ObjectId, ref: 'Alumni', required: true },
@@ -19,12 +20,21 @@ const webinarSchema = new Schema({
     filename: { type: String },
     path: { type: String },
     mimetype: { type: String },
-    size: { type: Number }
+    size: { type: Number },
+    // YouTube specific fields
+    videoId: String,      // YouTube video ID
+    url: String,          // YouTube watch URL
+    embedUrl: String,     // YouTube embed URL
+    thumbnailUrl: String  // YouTube thumbnail URL
   },
   isUploaded: { type: Boolean, default: false },
   isLive: { type: Boolean, default: false },
   liveRoomId: { type: String },
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+  streamRoomId: {
+    type: String,
+    default: null
+  }
 });
 
-module.exports = mongoose.model('Webinar', webinarSchema);
+module.exports = mongoose.model('Webinar', WebinarSchema);  // Changed from webinarSchema to WebinarSchema

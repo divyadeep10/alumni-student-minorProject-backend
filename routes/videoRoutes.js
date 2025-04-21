@@ -4,7 +4,10 @@ const path = require('path');
 const fs = require('fs-extra');
 const jwt = require('jsonwebtoken');
 const Webinar = require('../models/Webinar');
+const Alumni = require('../models/Alumni');
 const upload = require('../functing/videoUpload');
+const youtubeService = require('../services/youtubeService');
+const { google } = require('googleapis');
 
 // Middleware to verify token and ensure the user is an alumni
 const authAlumni = (req, res, next) => {
@@ -22,7 +25,73 @@ const authAlumni = (req, res, next) => {
   }
 };
 
-// Upload video for a webinar
+// Check if user has connected YouTube
+router.get('/youtube-status', authAlumni, async (req, res) => {
+  try {
+    const connected = await youtubeService.isYoutubeConnected(req.user.userId);
+    res.json({ connected });
+  } catch (error) {
+    console.error('Error checking YouTube status:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get YouTube authorization URL
+router.get('/youtube-auth-url', authAlumni, (req, res) => {
+  try {
+    const authUrl = youtubeService.getAuthUrl(req.user.userId);
+    res.json({ authUrl });
+  } catch (error) {
+    console.error('Error generating auth URL:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// YouTube OAuth callback
+router.get('/youtube-callback', async (req, res) => {
+  try {
+    const { code, state } = req.query;
+    if (!code || !state) {
+      return res.status(400).send('Missing authorization code or state');
+    }
+    
+    // state contains the user ID
+    const userId = state;
+    
+    // Create OAuth client
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.CLIENT_ID,
+      process.env.CLIENT_SECRET,
+      process.env.REDIRECT_URI
+    );
+    
+    // Exchange code for tokens
+    const { tokens } = await oauth2Client.getToken(code);
+    
+    // Save tokens to user's record
+    await Alumni.findByIdAndUpdate(userId, { youtubeTokens: tokens });
+    
+    // Close the window with a success message
+    res.send(`
+      <html>
+        <body>
+          <h1>YouTube Connected Successfully!</h1>
+          <p>You can close this window and return to the application.</p>
+          <script>
+            setTimeout(function() {
+              window.close();
+            }, 3000);
+          </script>
+        </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error('OAuth callback error:', error);
+    res.status(500).send('Error connecting to YouTube: ' + error.message);
+  }
+});
+
+// Upload video to server and optionally to YouTube
 router.post('/upload/:webinarId', authAlumni, upload.single('video'), async (req, res) => {
   try {
     if (!req.file) {
@@ -38,47 +107,77 @@ router.post('/upload/:webinarId', authAlumni, upload.single('video'), async (req
     }
 
     // Check if the alumni is the host of the webinar
-    if (webinar.host.toString() !== req.user.userId) {
+    if (webinar.host && webinar.host.toString() !== req.user.userId) {
       // Delete the uploaded file if not authorized
       fs.unlinkSync(req.file.path);
       return res.status(403).json({ message: "Not authorized to upload video for this webinar" });
     }
 
-    // If there was a previous video, delete it
-    if (webinar.videoFile && webinar.videoFile.path) {
-      const oldFilePath = path.join(__dirname, '..', webinar.videoFile.path);
-      if (fs.existsSync(oldFilePath)) {
-        fs.unlinkSync(oldFilePath);
-      }
-    }
-
-    // Update webinar with new video file info
-    webinar.videoFile = {
+    // Update webinar with video file info
+    const videoInfo = {
       filename: req.file.filename,
-      path: req.file.path.replace(/\\/g, '/').replace(/^.*\/uploads/, '/uploads'),
+      path: req.file.path,
       mimetype: req.file.mimetype,
       size: req.file.size
     };
+    
+    // Check if we should upload to YouTube
+    const uploadToYoutube = req.body.uploadToYoutube === 'true';
+    const privacyStatus = req.body.privacyStatus || 'private'; // Default to private
+    
+    if (uploadToYoutube) {
+      try {
+        // Check if user has connected YouTube
+        const connected = await youtubeService.isYoutubeConnected(req.user.userId);
+        
+        if (!connected) {
+          return res.status(400).json({ 
+            message: "YouTube account not connected. Please connect your YouTube account first." 
+          });
+        }
+        
+        // Upload to YouTube with privacy status
+        const youtubeData = await youtubeService.uploadVideo(
+          req.user.userId,
+          req.file.path,
+          webinar.title,
+          webinar.description,
+          privacyStatus
+        );
+        
+        // Add YouTube data to video info
+        videoInfo.videoId = youtubeData.id;
+        videoInfo.url = youtubeData.url;
+        videoInfo.embedUrl = youtubeData.embedUrl;
+        videoInfo.thumbnailUrl = youtubeData.thumbnailUrl;
+        videoInfo.privacyStatus = privacyStatus;
+      } catch (error) {
+        console.error('YouTube upload error:', error);
+        // Continue with local upload even if YouTube upload fails
+      }
+    }
+
+    // Update webinar with video info
+    webinar.videoFile = videoInfo;
     webinar.isUploaded = true;
-    
     await webinar.save();
-    
+
     res.status(200).json({ 
       message: "Video uploaded successfully",
-      webinar: {
-        id: webinar._id,
-        title: webinar.title,
-        videoType: webinar.videoType,
-        videoFile: webinar.videoFile
-      }
+      uploadedToYoutube: !!(videoInfo.videoId),
+      privacyStatus: videoInfo.privacyStatus || 'local'
     });
-  } catch (err) {
-    console.error("Error uploading video:", err);
-    // Clean up file if there was an error
+  } catch (error) {
+    console.error('Error uploading video:', error);
+    // Delete the uploaded file if there's an error
     if (req.file && req.file.path) {
-      fs.unlinkSync(req.file.path);
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (unlinkError) {
+        console.error('Error deleting file:', unlinkError);
+      }
     }
-    res.status(500).json({ message: "Server error during upload" });
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 });
 
@@ -92,20 +191,30 @@ router.delete('/delete/:webinarId', authAlumni, async (req, res) => {
     }
 
     // Check if the alumni is the host of the webinar
-    if (webinar.host.toString() !== req.user.userId) {
+    if (webinar.host && webinar.host.toString() !== req.user.userId) {
       return res.status(403).json({ message: "Not authorized to delete video for this webinar" });
     }
 
-    // If there's a video file, delete it
-    if (webinar.videoFile && webinar.videoFile.path) {
-      const filePath = path.join(__dirname, '..', webinar.videoFile.path);
+    // If it's a YouTube video, delete it from YouTube
+    if (webinar.videoFile && webinar.videoFile.videoId) {
+      try {
+        await youtubeService.deleteVideo(webinar.videoFile.videoId);
+      } catch (youtubeError) {
+        console.error('Error deleting from YouTube:', youtubeError);
+        // Continue with local deletion even if YouTube deletion fails
+      }
+    }
+
+    // If there's a local file, delete it
+    if (webinar.videoFile && webinar.videoFile.path && !webinar.videoFile.videoId) {
+      const filePath = path.join(__dirname, '..', 'public', webinar.videoFile.filename);
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
     }
 
-    // Update webinar to remove video file info
-    webinar.videoFile = undefined;
+    // Update webinar
+    webinar.videoFile = null;
     webinar.isUploaded = false;
     
     await webinar.save();
@@ -113,439 +222,220 @@ router.delete('/delete/:webinarId', authAlumni, async (req, res) => {
     res.status(200).json({ message: "Video deleted successfully" });
   } catch (err) {
     console.error("Error deleting video:", err);
-    res.status(500).json({ message: "Server error during deletion" });
-  }
-});
-// Stream video for a webinar (continued)
-router.get('/stream/:webinarId', async (req, res) => {
-  let fileStream; // Declare the file stream in the outer scope for access in catch
-  try {
-    const webinar = await Webinar.findById(req.params.webinarId);
-    
-    if (!webinar || !webinar.videoFile || !webinar.videoFile.path) {
-      return res.status(404).json({ message: "Video not found" });
-    }
-
-    const filePath = path.join(__dirname, '..', webinar.videoFile.path);
-    
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ message: "Video file not found" });
-    }
-
-    const stat = fs.statSync(filePath);
-    const fileSize = stat.size;
-    const range = req.headers.range;
-
-    if (range) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunkSize = (end - start) + 1;
-
-      fileStream = fs.createReadStream(filePath, { start, end });
-      
-      res.writeHead(206, {
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunkSize,
-        'Content-Type': webinar.videoFile.mimetype
-      });
-      
-      fileStream.pipe(res);
-    } else {
-      res.writeHead(200, {
-        'Content-Length': fileSize,
-        'Content-Type': webinar.videoFile.mimetype
-      });
-      
-      fileStream = fs.createReadStream(filePath);
-      fileStream.pipe(res);
-    }
-  } catch (err) {
-    // Clean up any open file streams
-    if (fileStream) {
-      fileStream.destroy();
-    }
-    console.error("Error streaming video:", err);
-    res.status(500).json({ message: "Server error during streaming" });
-  }
-});
-  
-  // Get all webinars with videos for a student
-  router.get('/student/webinars', async (req, res) => {
-    try {
-      const token = req.header('Authorization');
-      if (!token) {
-        return res.status(401).json({ message: "No token, authorization denied" });
-      }
-      
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      if (decoded.role !== 'student') {
-        return res.status(403).json({ message: "Access denied" });
-      }
-      
-      const studentId = decoded.userId;
-      
-      // Find alumni who have this student in their connections
-      const Student = require('../models/Student');
-      const student = await Student.findById(studentId);
-      
-      if (!student) {
-        return res.status(404).json({ message: "Student not found" });
-      }
-      
-      // Get webinars from connected alumni that have videos uploaded or are live
-      const webinars = await Webinar.find({
-        host: { $in: student.connections },
-        $or: [{ isUploaded: true }, { isLive: true }]
-      }).populate("host", "name email");
-      
-      res.json(webinars);
-    } catch (err) {
-      console.error("Error fetching webinars:", err);
-      res.status(500).json({ message: "Server error" });
-    }
-  });
-  // Create an on-site webinar
-router.post('/create-onsite', authAlumni, async (req, res) => {
-  try {
-    const { title, description, scheduledAt, location } = req.body;
-    
-    if (!location || !location.address || !location.venue) {
-      return res.status(400).json({ message: "Location details are required for on-site webinars" });
-    }
-
-    const webinar = new Webinar({
-      title,
-      description,
-      host: req.user.userId,
-      scheduledAt,
-      videoType: "on-site",
-      location,
-      isOnSite: true
-    });
-
-    await webinar.save();
-    
-    res.status(201).json({ 
-      message: "On-site webinar created successfully",
-      webinar: {
-        id: webinar._id,
-        title: webinar.title,
-        scheduledAt: webinar.scheduledAt,
-        location: webinar.location
-      }
-    });
-  } catch (err) {
-    console.error("Error creating on-site webinar:", err);
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({ message: "Server error", error: err.message });
   }
 });
 
-// Update on-site webinar details
-router.put('/update-onsite/:webinarId', authAlumni, async (req, res) => {
+// Get video details
+// In your GET video details route, update the response:
+
+router.get('/:webinarId', async (req, res) => {
   try {
-    const { title, description, scheduledAt, location } = req.body;
-    
     const webinar = await Webinar.findById(req.params.webinarId);
     
     if (!webinar) {
       return res.status(404).json({ message: "Webinar not found" });
     }
 
-    // Check if the alumni is the host of the webinar
-    if (webinar.host.toString() !== req.user.userId) {
-      return res.status(403).json({ message: "Not authorized to update this webinar" });
+    if (!webinar.videoFile) {
+      return res.status(404).json({ message: "No video found for this webinar" });
     }
 
-    // Update webinar details
-    if (title) webinar.title = title;
-    if (description) webinar.description = description;
-    if (scheduledAt) webinar.scheduledAt = scheduledAt;
-    if (location) {
-      webinar.location = location;
-      webinar.isOnSite = true;
+    // Add the full URL for the video file
+    let videoDetails = { ...webinar.videoFile };
+    
+    // If it's a local video, add the full URL
+    if (videoDetails.filename && !videoDetails.videoId) {
+      videoDetails.fullUrl = `http://localhost:5000/uploads/videos/${videoDetails.filename}`;
     }
-    
-    await webinar.save();
-    
-    res.status(200).json({ 
-      message: "On-site webinar updated successfully",
-      webinar: {
-        id: webinar._id,
-        title: webinar.title,
-        scheduledAt: webinar.scheduledAt,
-        location: webinar.location
-      }
+
+    res.json({
+      webinarId: webinar._id,
+      title: webinar.title,
+      description: webinar.description,
+      videoDetails: videoDetails
     });
   } catch (err) {
-    console.error("Error updating on-site webinar:", err);
-    res.status(500).json({ message: "Server error" });
+    console.error("Error getting video details:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
   }
 });
 
-// Get all on-site webinars for a student
-router.get('/student/onsite-webinars', async (req, res) => {
+// Mark a webinar as live
+router.put('/webinar/:id/go-live', authAlumni, async (req, res) => {
   try {
-    const token = req.header('Authorization');
-    if (!token) {
-      return res.status(401).json({ message: "No token, authorization denied" });
-    }
+    const webinarId = req.params.id;
+    const alumniId = req.user.userId;
     
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (decoded.role !== 'student') {
-      return res.status(403).json({ message: "Access denied" });
-    }
-    
-    const studentId = decoded.userId;
-    
-    // Find alumni who have this student in their connections
-    const Student = require('../models/Student');
-    const student = await Student.findById(studentId);
-    
-    if (!student) {
-      return res.status(404).json({ message: "Student not found" });
-    }
-    
-    // Get on-site webinars from connected alumni
-    const webinars = await Webinar.find({
-      host: { $in: student.connections },
-      isOnSite: true
-    }).populate("host", "name email");
-    
-    res.json(webinars);
-  } catch (err) {
-    console.error("Error fetching on-site webinars:", err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
-// Register for an on-site webinar
-router.post('/register-onsite/:webinarId', async (req, res) => {
-  try {
-    const token = req.header('Authorization');
-    if (!token) {
-      return res.status(401).json({ message: "No token, authorization denied" });
-    }
-    
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    if (decoded.role !== 'student') {
-      return res.status(403).json({ message: "Access denied" });
-    }
-    
-    const studentId = decoded.userId;
-    const webinarId = req.params.webinarId;
-    
+    // Find the webinar and verify ownership
     const webinar = await Webinar.findById(webinarId);
+    
     if (!webinar) {
-      return res.status(404).json({ message: "Webinar not found" });
+      return res.status(404).json({ message: 'Webinar not found' });
     }
     
-    if (!webinar.isOnSite) {
-      return res.status(400).json({ message: "This is not an on-site webinar" });
+    if (webinar.host.toString() !== alumniId) {
+      return res.status(403).json({ message: 'Not authorized to modify this webinar' });
     }
     
-    // Check if student is connected to the host
-    const Student = require('../models/Student');
-    const student = await Student.findById(studentId);
+    // Generate a room ID based on webinar ID (or use webinar ID directly)
+    const streamRoomId = webinarId.toString();
     
-    if (!student) {
-      return res.status(404).json({ message: "Student not found" });
-    }
-    
-    const canRegister = student.connections.includes(webinar.host);
-    
-    if (!canRegister) {
-      return res.status(403).json({ message: "You are not connected to this webinar host" });
-    }
-    
-    // Check if student is already registered
-    if (webinar.participants.includes(studentId)) {
-      return res.status(400).json({ message: "You are already registered for this webinar" });
-    }
-    
-    // Add student to participants
-    webinar.participants.push(studentId);
+    // Update the webinar to mark it as live and store the stream room ID
+    webinar.isLive = true;
+    webinar.streamRoomId = streamRoomId;
     await webinar.save();
+    
+    // Return the stream URL that will be used for redirection
+    const streamHostUrl = `http://localhost:3000/host?room=${streamRoomId}&webinar=${webinarId}`;
     
     res.json({ 
-      message: "Successfully registered for the on-site webinar",
-      webinar: {
-        id: webinar._id,
-        title: webinar.title,
-        scheduledAt: webinar.scheduledAt,
-        location: webinar.location
-      }
+      message: 'Webinar is now live', 
+      webinar,
+      streamUrl: streamHostUrl
     });
-  } catch (err) {
-    console.error("Error registering for on-site webinar:", err);
-    res.status(500).json({ message: "Server error" });
+  } catch (error) {
+    console.error('Error marking webinar as live:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
-// Get registered students for an on-site webinar
-router.get('/onsite-participants/:webinarId', authAlumni, async (req, res) => {
+// Get stream info for a webinar
+router.get('/webinar/:id/stream-info', async (req, res) => {
   try {
-    const webinar = await Webinar.findById(req.params.webinarId);
+    const webinarId = req.params.id;
+    
+    // Find the webinar
+    const webinar = await Webinar.findById(webinarId);
     
     if (!webinar) {
-      return res.status(404).json({ message: "Webinar not found" });
-    }
-
-    // Check if the alumni is the host of the webinar
-    if (webinar.host.toString() !== req.user.userId) {
-      return res.status(403).json({ message: "Not authorized to view participants for this webinar" });
+      return res.status(404).json({ message: 'Webinar not found' });
     }
     
-    if (!webinar.isOnSite) {
-      return res.status(400).json({ message: "This is not an on-site webinar" });
+    if (!webinar.isLive) {
+      return res.status(400).json({ message: 'This webinar is not currently live' });
     }
     
-    // Get participant details
-    const participants = await Student.find({
-      _id: { $in: webinar.participants }
-    }).select("name email collegeId");
+    // Return the stream URL for viewers
+    const streamViewerUrl = `http://localhost:3000/view?room=${webinar.streamRoomId}&webinar=${webinarId}`;
     
-    res.json(participants);
-  } catch (err) {
-    console.error("Error fetching on-site webinar participants:", err);
-    res.status(500).json({ message: "Server error" });
+    res.json({
+      isLive: webinar.isLive,
+      streamUrl: streamViewerUrl,
+      roomId: webinar.streamRoomId
+    });
+  } catch (error) {
+    console.error('Error getting stream info:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 // End a live webinar
-router.post('/end-live/:webinarId', authAlumni, async (req, res) => {
+router.put('/webinar/:id/end-live', authAlumni, async (req, res) => {
   try {
-    const webinar = await Webinar.findById(req.params.webinarId);
+    const webinarId = req.params.id;
+    const alumniId = req.user.userId;
+    
+    // Find the webinar and verify ownership
+    const webinar = await Webinar.findById(webinarId);
     
     if (!webinar) {
-      return res.status(404).json({ message: "Webinar not found" });
+      return res.status(404).json({ message: 'Webinar not found' });
     }
-  
-    // Check if the alumni is the host of the webinar
-    if (webinar.host.toString() !== req.user.userId) {
-      return res.status(403).json({ message: "Not authorized to end live stream for this webinar" });
-    }
-  
-    // Update webinar to mark it as not live
-    webinar.isLive = false;
-    webinar.liveRoomId = undefined;
     
+    if (webinar.host.toString() !== alumniId) {
+      return res.status(403).json({ message: 'Not authorized to modify this webinar' });
+    }
+    
+    // Update the webinar to mark it as not live and clear the stream room ID
+    webinar.isLive = false;
+    webinar.streamRoomId = null;
     await webinar.save();
     
-    res.status(200).json({ message: "Live webinar ended successfully" });
+    res.json({ message: 'Live webinar ended', webinar });
+  } catch (error) {
+    console.error('Error ending live webinar:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Upload video to YouTube
+router.post('/upload-to-youtube/:webinarId', authAlumni, async (req, res) => {
+  try {
+    const { webinarId } = req.params;
+    const { title, description, privacyStatus } = req.body;
+    
+    console.log(`Received YouTube upload request for webinar: ${webinarId}`);
+    
+    // Find the webinar
+    const webinar = await Webinar.findById(webinarId);
+    if (!webinar) {
+      return res.status(404).json({ message: 'Webinar not found' });
+    }
+    
+    // Check if webinar belongs to the user
+    if (webinar.alumniId.toString() !== req.user.userId) {
+      return res.status(403).json({ message: 'Not authorized to upload for this webinar' });
+    }
+    
+    // Check if video exists
+    if (!webinar.videoDetails || !webinar.videoDetails.path) {
+      return res.status(400).json({ message: 'No video file found for this webinar' });
+    }
+    
+    const videoPath = path.join(__dirname, '..', webinar.videoDetails.path);
+    console.log('Video path:', videoPath);
+    
+    // Upload to YouTube
+    const youtubeData = await youtubeService.uploadVideo(
+      req.user.userId,
+      videoPath,
+      title || webinar.title,
+      description || webinar.description,
+      privacyStatus || 'private'
+    );
+    
+    // Update webinar with YouTube data
+    webinar.videoDetails.youtubeId = youtubeData.id;
+    webinar.videoDetails.embedUrl = `https://www.youtube.com/embed/${youtubeData.id}`;
+    await webinar.save();
+    
+    res.json({ 
+      success: true, 
+      message: 'Video uploaded to YouTube successfully',
+      youtubeData
+    });
+  } catch (error) {
+    console.error('Error uploading to YouTube:', error);
+    res.status(500).json({ 
+      message: 'Failed to upload to YouTube', 
+      error: error.message 
+    });
+  }
+});
+
+router.get('/student/webinars', async (req, res) => {
+  try {
+    const webinars = await Webinar.find({ /* your filter */ }).populate('host');
+    // Add embedUrl for YouTube videos if missing
+    const webinarsWithEmbed = webinars.map(w => {
+      let embedUrl = w.videoFile?.embedUrl;
+      if (!embedUrl && w.videoFile?.videoId) {
+        embedUrl = `https://www.youtube.com/embed/${w.videoFile.videoId}`;
+      }
+      return {
+        ...w.toObject(),
+        videoDetails: {
+          ...w.videoFile,
+          embedUrl,
+          localUrl: w.videoFile?.filename ? `http://localhost:5000/uploads/videos/${w.videoFile.filename}` : null
+        }
+      };
+    });
+    res.json(webinarsWithEmbed);
   } catch (err) {
-    console.error("Error ending live webinar:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
-  
-  // Get live webinar details
-  router.get('/live/:webinarId', async (req, res) => {
-    try {
-      const webinar = await Webinar.findById(req.params.webinarId);
-      
-      if (!webinar) {
-        return res.status(404).json({ message: "Webinar not found" });
-      }
-  
-      if (!webinar.isLive) {
-        return res.status(400).json({ message: "Webinar is not currently live" });
-      }
-      
-      res.json({
-        id: webinar._id,
-        title: webinar.title,
-        host: webinar.host,
-        liveRoomId: webinar.liveRoomId,
-        isLive: webinar.isLive
-      });
-    } catch (err) {
-      console.error("Error fetching live webinar details:", err);
-      res.status(500).json({ message: "Server error" });
-    }
-  });
-  
-  // Get all live webinars for a student
-  router.get('/student/live-webinars', async (req, res) => {
-    try {
-      const token = req.header('Authorization');
-      if (!token) {
-        return res.status(401).json({ message: "No token, authorization denied" });
-      }
-      
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      if (decoded.role !== 'student') {
-        return res.status(403).json({ message: "Access denied" });
-      }
-      
-      const studentId = decoded.userId;
-      
-      // Find alumni who have this student in their connections
-      const Student = require('../models/Student');
-      const student = await Student.findById(studentId);
-      
-      if (!student) {
-        return res.status(404).json({ message: "Student not found" });
-      }
-      
-      // Get live webinars from connected alumni
-      const webinars = await Webinar.find({
-        host: { $in: student.connections },
-        isLive: true
-      }).populate("host", "name email");
-      
-      res.json(webinars);
-    } catch (err) {
-      console.error("Error fetching live webinars:", err);
-      res.status(500).json({ message: "Server error" });
-    }
-  });
-  
-  // Check if a student can join a live webinar
-  router.get('/can-join/:webinarId', async (req, res) => {
-    try {
-      const token = req.header('Authorization');
-      if (!token) {
-        return res.status(401).json({ message: "No token, authorization denied" });
-      }
-      
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      if (decoded.role !== 'student') {
-        return res.status(403).json({ message: "Access denied" });
-      }
-      
-      const studentId = decoded.userId;
-      const webinarId = req.params.webinarId;
-      
-      const webinar = await Webinar.findById(webinarId);
-      if (!webinar) {
-        return res.status(404).json({ message: "Webinar not found" });
-      }
-      
-      if (!webinar.isLive) {
-        return res.status(400).json({ message: "Webinar is not currently live" });
-      }
-      
-      // Check if student is connected to the host
-      const Student = require('../models/Student');
-      const student = await Student.findById(studentId);
-      
-      if (!student) {
-        return res.status(404).json({ message: "Student not found" });
-      }
-      
-      const canJoin = student.connections.includes(webinar.host);
-      
-      if (!canJoin) {
-        return res.status(403).json({ message: "You are not connected to this webinar host" });
-      }
-      
-      res.json({ canJoin: true, webinar });
-    } catch (err) {
-      console.error("Error checking webinar access:", err);
-      res.status(500).json({ message: "Server error" });
-    }
-  });
-  
-  module.exports = router;
+
+module.exports = router;

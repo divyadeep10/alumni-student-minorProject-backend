@@ -1,17 +1,18 @@
+// Add this to your existing Alumni schema
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 
+// Assuming you have an existing Alumni schema, add this field:
 const alumniSchema = new Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   collegeId: { type: String, required: true },
   careerInsights: { type: String },
   password: { type: String, required: true },
-  mentees: [{ type: Schema.Types.ObjectId, ref: 'Student' }], // accepted student requests
+  mentees: [{ type: Schema.Types.ObjectId, ref: 'Student' }],
   connections: [{ type: Schema.Types.ObjectId, ref: 'Student' }],
   createdAt: { type: Date, default: Date.now },
-  // New fields for AI matching
-  expertiseAreas: { type: Map, of: Number }, // Expertise areas with strength (1-10)
+  expertiseAreas: { type: Map, of: Number },
   industryExperience: [String],
   mentorStyle: { type: String, enum: ['directive', 'non-directive', 'collaborative', 'observational'] },
   availability: [{ 
@@ -27,7 +28,16 @@ const alumniSchema = new Schema({
     endDate: Date,
     outcome: { type: String, enum: ['ongoing', 'completed', 'discontinued'] },
     notes: String
-  }]
+  }],
+  youtubeTokens: {
+    access_token: String,
+    refresh_token: String,
+    scope: String,
+    token_type: String,
+    expiry_date: Number
+  },
+  isAdmin: { type: Boolean, default: false }  // Removed comma here
 });
 
+// If this is a new file, add:
 module.exports = mongoose.model('Alumni', alumniSchema);
