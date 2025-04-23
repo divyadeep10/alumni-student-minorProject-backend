@@ -71,6 +71,6 @@ This platform uses AI to intelligently match students with alumni mentors based 
 - 🔗 Blockchain-Based Mentorship Certificate Verification
 - 📊 Admin Dashboards with Visual Analytics
 
-## Backend Github 
+## Frontend Github 
 
-- https://github.com/divyadeep10/alumni-student-minorProject-backend
+- https://github.com/divyadeep10/alumni-student-minorProject-backend](https://github.com/divyadeep10/AI-Based_Alumnistudent-Frontend/tree/main
