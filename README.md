@@ -73,4 +73,4 @@ This platform uses AI to intelligently match students with alumni mentors based 
 
 ## Frontend Github 
 
-- https://github.com/divyadeep10/alumni-student-minorProject-backend](https://github.com/divyadeep10/AI-Based_Alumnistudent-Frontend/tree/main
+- https://github.com/divyadeep10/AI-Based_Alumnistudent-Frontend/tree/main
